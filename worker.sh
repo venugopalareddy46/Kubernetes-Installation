@@ -11,25 +11,39 @@ set -e
 K8S_VERSION="v1.36"
 
 # =========================================================
-# CHECK HOSTNAME ARGUMENT
+# ASK WORKER HOSTNAME
 # =========================================================
 
-if [ -z "$1" ]; then
+echo ""
+echo "========================================================="
+echo " Kubernetes Worker Node Setup"
+echo "========================================================="
+echo ""
+
+read -p "Enter Worker Node Name (e.g. worker-1): " WORKER_HOSTNAME
+
+# Check empty input
+if [ -z "$WORKER_HOSTNAME" ]; then
     echo ""
-    echo "ERROR: Worker hostname is required."
-    echo ""
-    echo "Usage:"
-    echo "  ./worker.sh worker-1"
-    echo "  ./worker.sh worker-2"
-    echo "  ./worker.sh worker-3"
-    echo ""
+    echo "ERROR: Worker node name cannot be empty."
     exit 1
 fi
 
-WORKER_HOSTNAME="$1"
+echo ""
+echo "Worker Node Name : ${WORKER_HOSTNAME}"
+echo "Kubernetes       : ${K8S_VERSION}"
+echo ""
 
+read -p "Continue with this worker name? (y/n): " CONFIRM
+
+if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
+    echo "Setup cancelled."
+    exit 0
+fi
+
+echo ""
 echo "========================================================="
-echo " Kubernetes Worker Node Setup"
+echo " Starting Worker Node Setup"
 echo " Hostname   : ${WORKER_HOSTNAME}"
 echo " Kubernetes : ${K8S_VERSION}"
 echo "========================================================="
