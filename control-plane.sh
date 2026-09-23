@@ -1,445 +1,351 @@
+```bash
 #!/bin/bash
 
-# =========================================================
-# Kubernetes Control Plane Setup
-# Kubernetes + Containerd + Calico
-# =========================================================
+# ============================================================
+# COMPLETE KUBERNETES CONTROL PLANE INSTALLATION
+# ============================================================
+#
+# Ubuntu EC2
+#
+# Components:
+#   Kubernetes : v1.36.4
+#   Container  : containerd
+#   CNI        : Calico v3.32.2
+#   Operator   : Tigera Operator
+#   Ingress    : ingress-nginx v1.15.1
+#
+# Run as ROOT
+# NO SUDO REQUIRED
+#
+# ============================================================
 
-set -e
+set -euo pipefail
 
-# =========================================================
-# DEFAULT CONFIGURATION
-# =========================================================
+# ============================================================
+# CONFIGURATION
+# ============================================================
 
-DEFAULT_K8S_VERSION="v1.36"
-DEFAULT_CONTROL_PLANE_HOSTNAME="control-plane"
-DEFAULT_POD_NETWORK_CIDR="192.168.0.0/16"
-DEFAULT_CALICO_VERSION="v3.32.1"
+K8S_MINOR_VERSION="v1.36"
+K8S_VERSION="1.36.4"
 
+CALICO_VERSION="v3.32.2"
 
-# =========================================================
-# SCRIPT HEADER
-# =========================================================
+INGRESS_VERSION="v1.15.1"
 
-clear
+DEFAULT_HOSTNAME="control-plane"
 
-echo ""
-echo "========================================================="
-echo "       Kubernetes Control Plane Setup"
-echo "========================================================="
-echo ""
-echo " Kubernetes : kubeadm"
-echo " Container  : containerd"
-echo " CNI        : Calico"
-echo ""
-echo "========================================================="
-echo ""
+DEFAULT_POD_CIDR="192.168.0.0/16"
+
+CALICO_BASE_URL="https://raw.githubusercontent.com/projectcalico/calico/${CALICO_VERSION}/manifests"
+
+INGRESS_URL="https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-${INGRESS_VERSION}/deploy/static/provider/baremetal/deploy.yaml"
 
 
-# =========================================================
-# 1. KUBERNETES VERSION
-# =========================================================
+# ============================================================
+# ROOT CHECK
+# ============================================================
 
-echo ""
-echo "========================================================="
-echo " Kubernetes Version Selection"
-echo "========================================================="
-echo ""
-
-echo "Default Kubernetes Version: ${DEFAULT_K8S_VERSION}"
-echo ""
-
-read -p "Do you want to use the default version ${DEFAULT_K8S_VERSION}? (y/n): " USE_DEFAULT
-
-if [[ "$USE_DEFAULT" == "y" || "$USE_DEFAULT" == "Y" ]]; then
-
-    K8S_VERSION="${DEFAULT_K8S_VERSION}"
-
-elif [[ "$USE_DEFAULT" == "n" || "$USE_DEFAULT" == "N" ]]; then
-
-    echo ""
-    read -p "Enter Kubernetes version (example: v1.35): " K8S_VERSION
-
-    if [ -z "$K8S_VERSION" ]; then
-        echo ""
-        echo "ERROR: Kubernetes version cannot be empty."
-        exit 1
-    fi
-
-else
-
-    echo ""
-    echo "ERROR: Please enter y or n."
+if [ "$(id -u)" -ne 0 ]; then
+    echo
+    echo "ERROR: This script must be executed as ROOT."
+    echo
+    echo "Run:"
+    echo "  su -"
+    echo "  bash install-k8s.sh"
+    echo
     exit 1
-
 fi
 
 
-# =========================================================
-# 2. CONTROL PLANE HOSTNAME
-# =========================================================
+# ============================================================
+# HEADER
+# ============================================================
 
-echo ""
-echo "========================================================="
-echo " Control Plane Hostname"
-echo "========================================================="
-echo ""
+clear
 
-echo "Default Hostname: ${DEFAULT_CONTROL_PLANE_HOSTNAME}"
-echo ""
+echo
+echo "============================================================"
+echo " Kubernetes Complete Installation"
+echo "============================================================"
+echo
+echo " Kubernetes       : ${K8S_VERSION}"
+echo " Container Runtime : containerd"
+echo " Calico            : ${CALICO_VERSION}"
+echo " Ingress-NGINX     : ${INGRESS_VERSION}"
+echo " Pod CIDR          : ${DEFAULT_POD_CIDR}"
+echo
+echo " Running as ROOT"
+echo " No sudo required"
+echo
+echo "============================================================"
+echo
 
-read -p "Do you want to use the default hostname ${DEFAULT_CONTROL_PLANE_HOSTNAME}? (y/n): " USE_DEFAULT_HOSTNAME
 
-if [[ "$USE_DEFAULT_HOSTNAME" == "y" || "$USE_DEFAULT_HOSTNAME" == "Y" ]]; then
+# ============================================================
+# HOSTNAME
+# ============================================================
 
-    CONTROL_PLANE_HOSTNAME="${DEFAULT_CONTROL_PLANE_HOSTNAME}"
+echo
+echo "[1/18] Configure Hostname"
+echo "------------------------------------------------------------"
 
-elif [[ "$USE_DEFAULT_HOSTNAME" == "n" || "$USE_DEFAULT_HOSTNAME" == "N" ]]; then
+read -rp "Use hostname '${DEFAULT_HOSTNAME}'? (y/n): " USE_DEFAULT_HOSTNAME
 
-    echo ""
-    read -p "Enter Control Plane Hostname: " CONTROL_PLANE_HOSTNAME
+if [[ "${USE_DEFAULT_HOSTNAME}" =~ ^[Yy]$ ]]; then
 
-    if [ -z "$CONTROL_PLANE_HOSTNAME" ]; then
-        echo ""
+    CONTROL_PLANE_HOSTNAME="${DEFAULT_HOSTNAME}"
+
+elif [[ "${USE_DEFAULT_HOSTNAME}" =~ ^[Nn]$ ]]; then
+
+    read -rp "Enter Control Plane Hostname: " CONTROL_PLANE_HOSTNAME
+
+    if [ -z "${CONTROL_PLANE_HOSTNAME}" ]; then
         echo "ERROR: Hostname cannot be empty."
         exit 1
     fi
 
 else
 
-    echo ""
-    echo "ERROR: Please enter y or n."
+    echo "ERROR: Enter y or n."
     exit 1
 
 fi
 
-sudo hostnamectl set-hostname "${CONTROL_PLANE_HOSTNAME}"
+hostnamectl set-hostname "${CONTROL_PLANE_HOSTNAME}"
 
-echo ""
-echo "Control Plane Hostname:"
+echo
+echo "Hostname:"
 hostname
 
 
-# =========================================================
-# 3. CONTROL PLANE PRIVATE IP
-# =========================================================
+# ============================================================
+# CONTROL PLANE PRIVATE IP
+# ============================================================
 
-echo ""
-echo "========================================================="
-echo " Control Plane Private IP"
-echo "========================================================="
-echo ""
+echo
+echo "[2/18] Configure Control Plane Private IP"
+echo "------------------------------------------------------------"
 
-echo "IMPORTANT:"
-echo ""
-echo "You must enter the PRIVATE IPv4 address of this"
-echo "Control Plane EC2 instance."
-echo ""
-echo "How to find it in AWS:"
-echo ""
-echo "  1. Open AWS Management Console."
-echo "  2. Navigate to EC2."
-echo "  3. Select Instances."
-echo "  4. Select this Control Plane instance."
-echo "  5. Open the instance Details."
-echo "  6. Find 'Private IPv4 address'."
-echo "  7. Copy that Private IPv4 address."
-echo ""
+echo
+echo "Your EC2 PRIVATE IPv4 address is required."
+echo
+echo "Check with:"
+echo
+echo "  ip -4 addr"
+echo
 echo "Example:"
 echo "  10.0.1.10"
-echo ""
-echo "DO NOT use the Public IPv4 address."
-echo ""
+echo
 
-read -p "Enter Control Plane Private IP: " CONTROL_PLANE_IP
+read -rp "Enter Control Plane Private IP: " CONTROL_PLANE_IP
 
-if [ -z "$CONTROL_PLANE_IP" ]; then
-
-    echo ""
-    echo "ERROR: Control Plane Private IP cannot be empty."
+if [ -z "${CONTROL_PLANE_IP}" ]; then
+    echo "ERROR: Private IP cannot be empty."
     exit 1
-
 fi
 
 
-# =========================================================
-# VALIDATE CONTROL PLANE IP FORMAT
-# =========================================================
+# ============================================================
+# VALIDATE IPV4
+# ============================================================
 
-if ! [[ "$CONTROL_PLANE_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-
-    echo ""
+if ! [[ "${CONTROL_PLANE_IP}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
     echo "ERROR: Invalid IPv4 address."
-    echo "Example: 10.0.1.10"
     exit 1
-
 fi
 
-
-# =========================================================
-# VALIDATE IP OCTETS
-# =========================================================
-
-IFS='.' read -r -a IP_PARTS <<< "$CONTROL_PLANE_IP"
+IFS='.' read -r -a IP_PARTS <<< "${CONTROL_PLANE_IP}"
 
 for PART in "${IP_PARTS[@]}"; do
 
     if (( PART < 0 || PART > 255 )); then
-
-        echo ""
-        echo "ERROR: Invalid IPv4 address: ${CONTROL_PLANE_IP}"
+        echo "ERROR: Invalid IPv4 address."
         exit 1
-
     fi
 
 done
 
 
-# =========================================================
-# CHECK IP EXISTS ON THIS MACHINE
-# =========================================================
+# ============================================================
+# CHECK IP EXISTS
+# ============================================================
 
-echo ""
-echo "Checking Control Plane IP..."
+if ! ip -4 addr show | grep -qw "${CONTROL_PLANE_IP}"; then
 
-if ! ip -4 addr show | grep -qw "$CONTROL_PLANE_IP"; then
-
-    echo ""
-    echo "ERROR: ${CONTROL_PLANE_IP} is not assigned to this machine."
-    echo ""
+    echo
+    echo "ERROR:"
+    echo "${CONTROL_PLANE_IP} is NOT assigned to this machine."
+    echo
     echo "Available IPv4 addresses:"
-    echo ""
-
     ip -4 addr show
-
+    echo
     exit 1
 
 fi
 
-echo ""
+echo
 echo "Control Plane IP verified:"
 echo "${CONTROL_PLANE_IP}"
 
 
-# =========================================================
-# 4. POD NETWORK CIDR
-# =========================================================
+# ============================================================
+# POD NETWORK CIDR
+# ============================================================
 
-echo ""
-echo "========================================================="
-echo " Pod Network CIDR Selection"
-echo "========================================================="
-echo ""
+echo
+echo "[3/18] Configure Pod Network CIDR"
+echo "------------------------------------------------------------"
 
-echo "Default Pod Network CIDR: ${DEFAULT_POD_NETWORK_CIDR}"
-echo ""
+echo
+echo "Default:"
+echo "  ${DEFAULT_POD_CIDR}"
+echo
 
-read -p "Do you want to use the default Pod Network CIDR ${DEFAULT_POD_NETWORK_CIDR}? (y/n): " USE_DEFAULT_CIDR
+read -rp "Use ${DEFAULT_POD_CIDR}? (y/n): " USE_DEFAULT_CIDR
 
-if [[ "$USE_DEFAULT_CIDR" == "y" || "$USE_DEFAULT_CIDR" == "Y" ]]; then
+if [[ "${USE_DEFAULT_CIDR}" =~ ^[Yy]$ ]]; then
 
-    POD_NETWORK_CIDR="${DEFAULT_POD_NETWORK_CIDR}"
+    POD_NETWORK_CIDR="${DEFAULT_POD_CIDR}"
 
-elif [[ "$USE_DEFAULT_CIDR" == "n" || "$USE_DEFAULT_CIDR" == "N" ]]; then
+elif [[ "${USE_DEFAULT_CIDR}" =~ ^[Nn]$ ]]; then
 
-    echo ""
-    read -p "Enter Pod Network CIDR (example: 192.168.0.0/16): " POD_NETWORK_CIDR
+    read -rp "Enter Pod Network CIDR: " POD_NETWORK_CIDR
 
-    if [ -z "$POD_NETWORK_CIDR" ]; then
-
-        echo ""
-        echo "ERROR: Pod Network CIDR cannot be empty."
+    if [ -z "${POD_NETWORK_CIDR}" ]; then
+        echo "ERROR: Pod CIDR cannot be empty."
         exit 1
-
     fi
 
 else
 
-    echo ""
-    echo "ERROR: Please enter y or n."
+    echo "ERROR: Enter y or n."
     exit 1
 
 fi
 
 
-# =========================================================
+# ============================================================
 # BASIC CIDR VALIDATION
-# =========================================================
+# ============================================================
 
-if ! [[ "$POD_NETWORK_CIDR" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[1-2][0-9]|3[0-2])$ ]]; then
-
-    echo ""
+if ! [[ "${POD_NETWORK_CIDR}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[1-2][0-9]|3[0-2])$ ]]; then
     echo "ERROR: Invalid Pod Network CIDR."
-    echo "Example: 192.168.0.0/16"
     exit 1
-
 fi
 
 
-# =========================================================
-# 5. CALICO VERSION
-# =========================================================
+# ============================================================
+# FINAL CONFIGURATION
+# ============================================================
 
-echo ""
-echo "========================================================="
-echo " Calico Version Selection"
-echo "========================================================="
-echo ""
-
-echo "Default Calico Version: ${DEFAULT_CALICO_VERSION}"
-echo ""
-
-read -p "Do you want to use the default Calico version ${DEFAULT_CALICO_VERSION}? (y/n): " USE_DEFAULT_CALICO
-
-if [[ "$USE_DEFAULT_CALICO" == "y" || "$USE_DEFAULT_CALICO" == "Y" ]]; then
-
-    CALICO_VERSION="${DEFAULT_CALICO_VERSION}"
-
-elif [[ "$USE_DEFAULT_CALICO" == "n" || "$USE_DEFAULT_CALICO" == "N" ]]; then
-
-    echo ""
-    read -p "Enter Calico version (example: v3.32.1): " CALICO_VERSION
-
-    if [ -z "$CALICO_VERSION" ]; then
-
-        echo ""
-        echo "ERROR: Calico version cannot be empty."
-        exit 1
-
-    fi
-
-else
-
-    echo ""
-    echo "ERROR: Please enter y or n."
-    exit 1
-
-fi
-
-
-# =========================================================
-# 6. FINAL CONFIGURATION
-# =========================================================
-
-echo ""
-echo "========================================================="
+echo
+echo "============================================================"
 echo " Selected Configuration"
-echo "========================================================="
-echo ""
-echo " Control Plane Hostname : ${CONTROL_PLANE_HOSTNAME}"
-echo " Control Plane IP       : ${CONTROL_PLANE_IP}"
-echo " Pod Network CIDR       : ${POD_NETWORK_CIDR}"
-echo " Kubernetes             : ${K8S_VERSION}"
-echo " Calico                 : ${CALICO_VERSION}"
-echo ""
-echo "========================================================="
-echo ""
+echo "============================================================"
+echo
+echo " Hostname          : ${CONTROL_PLANE_HOSTNAME}"
+echo " Private IP        : ${CONTROL_PLANE_IP}"
+echo " Kubernetes        : ${K8S_VERSION}"
+echo " Kubernetes Repo   : ${K8S_MINOR_VERSION}"
+echo " Pod CIDR          : ${POD_NETWORK_CIDR}"
+echo " Calico            : ${CALICO_VERSION}"
+echo " Ingress-NGINX     : ${INGRESS_VERSION}"
+echo
+echo "============================================================"
+echo
 
-read -p "Continue with this configuration? (y/n): " CONFIRM
+read -rp "Continue? (y/n): " CONFIRM
 
-if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
-
-    echo ""
-    echo "Setup cancelled."
+if [[ ! "${CONFIRM}" =~ ^[Yy]$ ]]; then
+    echo "Installation cancelled."
     exit 0
-
 fi
 
 
-# =========================================================
-# 7. UPDATE UBUNTU
-# =========================================================
+# ============================================================
+# UPDATE UBUNTU
+# ============================================================
 
-echo ""
-echo "========================================================="
-echo "[7/16] Updating Ubuntu"
-echo "========================================================="
-echo ""
+echo
+echo "[4/18] Update Ubuntu"
+echo "------------------------------------------------------------"
 
-sudo apt update -y
-sudo apt upgrade -y
+apt-get update -y
+apt-get upgrade -y
 
 
-# =========================================================
-# 8. DISABLE SWAP
-# =========================================================
+# ============================================================
+# DISABLE SWAP
+# ============================================================
 
-echo ""
-echo "========================================================="
-echo "[8/16] Disabling Swap"
-echo "========================================================="
-echo ""
+echo
+echo "[5/18] Disable Swap"
+echo "------------------------------------------------------------"
 
-sudo swapoff -a
+swapoff -a
 
-sudo sed -i '/ swap / s/^/#/' /etc/fstab
+sed -i '/^[^#].*[[:space:]]swap[[:space:]]/s/^/#/' /etc/fstab
 
-echo ""
-echo "Swap status:"
+echo
+echo "Swap:"
 free -h
 
 
-# =========================================================
-# 9. LOAD KERNEL MODULES
-# =========================================================
+# ============================================================
+# KERNEL MODULES
+# ============================================================
 
-echo ""
-echo "========================================================="
-echo "[9/16] Loading Kubernetes Kernel Modules"
-echo "========================================================="
-echo ""
+echo
+echo "[6/18] Configure Kernel Modules"
+echo "------------------------------------------------------------"
 
-cat <<EOF | sudo tee /etc/modules-load.d/k8s.conf
+cat > /etc/modules-load.d/k8s.conf <<EOF
 overlay
 br_netfilter
 EOF
 
-sudo modprobe overlay
-sudo modprobe br_netfilter
+modprobe overlay
+modprobe br_netfilter
 
-echo ""
-echo "Loaded modules:"
+echo
+echo "Loaded:"
 lsmod | grep -E 'overlay|br_netfilter' || true
 
 
-# =========================================================
-# 10. CONFIGURE KUBERNETES NETWORKING
-# =========================================================
+# ============================================================
+# SYSCTL
+# ============================================================
 
-echo ""
-echo "========================================================="
-echo "[10/16] Configuring Kubernetes Networking"
-echo "========================================================="
-echo ""
+echo
+echo "[7/18] Configure Kubernetes Networking"
+echo "------------------------------------------------------------"
 
-cat <<EOF | sudo tee /etc/sysctl.d/k8s.conf
+cat > /etc/sysctl.d/k8s.conf <<EOF
 net.bridge.bridge-nf-call-iptables = 1
 net.bridge.bridge-nf-call-ip6tables = 1
 net.ipv4.ip_forward = 1
 EOF
 
-sudo sysctl --system
+sysctl --system
 
-echo ""
+echo
 echo "IP Forwarding:"
 sysctl net.ipv4.ip_forward
 
 
-# =========================================================
-# 11. INSTALL PREREQUISITES
-# =========================================================
+# ============================================================
+# PREREQUISITES
+# ============================================================
 
-echo ""
-echo "========================================================="
-echo "[11/16] Installing Kubernetes Prerequisites"
-echo "========================================================="
-echo ""
+echo
+echo "[8/18] Install Prerequisites"
+echo "------------------------------------------------------------"
 
-sudo apt install -y \
-    apt-transport-https \
+apt-get install -y \
     ca-certificates \
     curl \
     gpg \
+    apt-transport-https \
     conntrack \
     socat \
     ebtables \
@@ -451,314 +357,447 @@ sudo apt install -y \
     bash-completion
 
 
-# =========================================================
-# 12. INSTALL CONTAINERD
-# =========================================================
+# ============================================================
+# CONTAINERD
+# ============================================================
 
-echo ""
-echo "========================================================="
-echo "[12/16] Installing Containerd"
-echo "========================================================="
-echo ""
+echo
+echo "[9/18] Install Containerd"
+echo "------------------------------------------------------------"
 
-sudo apt install -y containerd
+apt-get install -y containerd
 
-sudo mkdir -p /etc/containerd
+mkdir -p /etc/containerd
 
-containerd config default | \
-sudo tee /etc/containerd/config.toml > /dev/null
+containerd config default > /etc/containerd/config.toml
 
-sudo sed -i \
-'s/SystemdCgroup = false/SystemdCgroup = true/' \
-/etc/containerd/config.toml
+sed -i \
+    's/SystemdCgroup = false/SystemdCgroup = true/' \
+    /etc/containerd/config.toml
 
-sudo systemctl restart containerd
-sudo systemctl enable containerd
+systemctl daemon-reload
 
-echo ""
+systemctl enable containerd
+
+systemctl restart containerd
+
+echo
 echo "Containerd status:"
-sudo systemctl is-active containerd
+systemctl is-active containerd
 
-echo ""
+echo
 echo "Containerd enabled:"
-sudo systemctl is-enabled containerd
+systemctl is-enabled containerd
 
 
-# =========================================================
-# 13. KUBERNETES REPOSITORY
-# =========================================================
+# ============================================================
+# KUBERNETES REPOSITORY
+# ============================================================
 
-echo ""
-echo "========================================================="
-echo "[13/16] Configuring Kubernetes Repository"
-echo "========================================================="
-echo ""
+echo
+echo "[10/18] Configure Kubernetes Repository"
+echo "------------------------------------------------------------"
 
-sudo mkdir -p -m 755 /etc/apt/keyrings
+mkdir -p -m 755 /etc/apt/keyrings
+
+rm -f /etc/apt/keyrings/kubernetes-apt-keyring.gpg
 
 curl -fsSL \
-"https://pkgs.k8s.io/core:/stable:/${K8S_VERSION}/deb/Release.key" | \
-sudo gpg --dearmor \
--o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+    "https://pkgs.k8s.io/core:/stable:/${K8S_MINOR_VERSION}/deb/Release.key" \
+    | gpg --dearmor --yes \
+    -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
 
-echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/${K8S_VERSION}/deb/ /" | \
-sudo tee /etc/apt/sources.list.d/kubernetes.list
+cat > /etc/apt/sources.list.d/kubernetes.list <<EOF
+deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/${K8S_MINOR_VERSION}/deb/ /
+EOF
+
+apt-get update -y
 
 
-# =========================================================
-# 14. INSTALL KUBERNETES
-# =========================================================
+# ============================================================
+# INSTALL KUBERNETES
+# ============================================================
 
-echo ""
-echo "========================================================="
-echo "[14/16] Installing Kubernetes Packages"
-echo "========================================================="
-echo ""
+echo
+echo "[11/18] Install Kubernetes"
+echo "------------------------------------------------------------"
 
-sudo apt-get update -y
+apt-get install -y \
+    kubelet="${K8S_VERSION}-*" \
+    kubeadm="${K8S_VERSION}-*" \
+    kubectl="${K8S_VERSION}-*"
 
-sudo apt-get install -y \
-    kubelet \
-    kubeadm \
-    kubectl
+apt-mark hold kubelet kubeadm kubectl
 
-sudo apt-mark hold kubelet kubeadm kubectl
+systemctl enable kubelet
 
-sudo systemctl enable --now kubelet
-
-echo ""
+echo
 echo "Kubernetes versions:"
-echo ""
+echo
 
 kubeadm version
 
-echo ""
+echo
 
 kubectl version --client
 
-echo ""
+echo
 
 kubelet --version
 
 
-# =========================================================
-# 15. INITIALIZE CONTROL PLANE
-# =========================================================
+# ============================================================
+# PRE-CHECK
+# ============================================================
 
-echo ""
-echo "========================================================="
-echo "[15/16] Initializing Control Plane"
-echo "========================================================="
-echo ""
+echo
+echo "[12/18] Kubernetes Pre-Checks"
+echo "------------------------------------------------------------"
 
-echo "Control Plane IP : ${CONTROL_PLANE_IP}"
-echo "Pod Network CIDR : ${POD_NETWORK_CIDR}"
-echo "Kubernetes       : ${K8S_VERSION}"
-echo ""
+echo
+echo "Container Runtime:"
+crictl --version 2>/dev/null || true
 
-sudo kubeadm init \
+echo
+echo "Hostname:"
+hostname
+
+echo
+echo "Private IP:"
+ip -4 addr show
+
+echo
+echo "Swap:"
+swapon --show
+
+echo
+echo "CRI socket:"
+ls -l /run/containerd/containerd.sock
+
+
+# ============================================================
+# KUBEADM INIT
+# ============================================================
+
+echo
+echo "[13/18] Initialize Kubernetes Control Plane"
+echo "------------------------------------------------------------"
+
+kubeadm init \
     --apiserver-advertise-address="${CONTROL_PLANE_IP}" \
     --pod-network-cidr="${POD_NETWORK_CIDR}" \
-    --v=5
+    --cri-socket=unix:///run/containerd/containerd.sock
 
 
-# =========================================================
-# 16. CONFIGURE KUBECTL
-# =========================================================
+# ============================================================
+# KUBECTL CONFIGURATION
+# ============================================================
 
-echo ""
-echo "========================================================="
-echo "[16/16] Configuring kubectl"
-echo "========================================================="
-echo ""
+echo
+echo "[14/18] Configure kubectl"
+echo "------------------------------------------------------------"
 
-mkdir -p "$HOME/.kube"
+mkdir -p /root/.kube
 
-sudo cp -i /etc/kubernetes/admin.conf \
-    "$HOME/.kube/config"
+cp -f /etc/kubernetes/admin.conf /root/.kube/config
 
-sudo chown "$(id -u):$(id -g)" \
-    "$HOME/.kube/config"
+chown root:root /root/.kube/config
 
-echo ""
-echo "kubectl configuration completed."
+export KUBECONFIG=/etc/kubernetes/admin.conf
 
-echo ""
-echo "Cluster information:"
+echo
+echo "Cluster:"
 kubectl cluster-info
 
-
-# =========================================================
-# INSTALL CALICO
-# =========================================================
-
-echo ""
-echo "========================================================="
-echo " Installing Calico ${CALICO_VERSION}"
-echo "========================================================="
-echo ""
-
-CALICO_BASE_URL="https://raw.githubusercontent.com/projectcalico/calico/${CALICO_VERSION}/manifests"
+echo
+echo "Nodes:"
+kubectl get nodes
 
 
-# =========================================================
+# ============================================================
 # CALICO CRDs
-# =========================================================
+# ============================================================
 
-echo ""
+echo
+echo "[15/18] Install Tigera Operator + Calico"
+echo "------------------------------------------------------------"
+
+echo
 echo "Installing Calico CRDs..."
 
-kubectl apply -f \
-"${CALICO_BASE_URL}/v1_crd_projectcalico_org.yaml"
+kubectl create -f \
+    "${CALICO_BASE_URL}/v1_crd_projectcalico_org.yaml"
 
 
-# =========================================================
+# ============================================================
 # TIGERA OPERATOR
-# =========================================================
+# ============================================================
 
-echo ""
+echo
 echo "Installing Tigera Operator..."
 
-kubectl apply -f \
-"${CALICO_BASE_URL}/tigera-operator.yaml"
+kubectl create -f \
+    "${CALICO_BASE_URL}/tigera-operator.yaml"
 
 
-# =========================================================
+echo
+echo "Waiting for Tigera Operator..."
+
+kubectl wait \
+    --namespace tigera-operator \
+    --for=condition=Available \
+    deployment/tigera-operator \
+    --timeout=180s
+
+
+# ============================================================
 # CALICO CUSTOM RESOURCES
-# =========================================================
+# ============================================================
 
-echo ""
+echo
 echo "Installing Calico Custom Resources..."
 
 TEMP_CALICO_FILE="/tmp/calico-custom-resources.yaml"
 
 curl -fsSL \
-"${CALICO_BASE_URL}/custom-resources.yaml" \
--o "${TEMP_CALICO_FILE}"
+    "${CALICO_BASE_URL}/custom-resources.yaml" \
+    -o "${TEMP_CALICO_FILE}"
 
-# Update the Calico IPPool CIDR to match the selected Pod CIDR.
+
+# ------------------------------------------------------------
+# Replace default Calico CIDR with selected Pod CIDR
+# ------------------------------------------------------------
+
 sed -i \
-"s#cidr: [0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}/[0-9]\{1,2\}#cidr: ${POD_NETWORK_CIDR}#g" \
-"${TEMP_CALICO_FILE}"
+    -E "s#cidr: [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+#cidr: ${POD_NETWORK_CIDR}#g" \
+    "${TEMP_CALICO_FILE"
 
-kubectl apply -f "${TEMP_CALICO_FILE}"
+
+# ------------------------------------------------------------
+# Install
+# ------------------------------------------------------------
+
+kubectl create -f "${TEMP_CALICO_FILE}"
 
 rm -f "${TEMP_CALICO_FILE}"
 
 
-# =========================================================
+# ============================================================
 # WAIT FOR CALICO
-# =========================================================
+# ============================================================
 
-echo ""
-echo "========================================================="
-echo " Waiting for Calico"
-echo "========================================================="
-echo ""
-
+echo
 echo "Waiting for Calico components..."
-
-kubectl wait \
-    --for=condition=Available \
-    deployment/tigera-operator \
-    -n tigera-operator \
-    --timeout=180s || true
 
 sleep 20
 
-echo ""
-echo "Calico pods:"
+echo
+echo "Tigera Operator:"
+kubectl get pods -n tigera-operator
+
+echo
+echo "Calico:"
 kubectl get pods -n calico-system
 
+echo
+echo "Tigera Status:"
+kubectl get tigerastatus
 
-# =========================================================
-# CONTROL PLANE STATUS
-# =========================================================
 
-echo ""
-echo "========================================================="
-echo " Control Plane Node"
-echo "========================================================="
-echo ""
+# ============================================================
+# WAIT FOR CALICO NODE
+# ============================================================
+
+echo
+echo "Waiting for Calico node..."
+
+for i in {1..30}; do
+
+    if kubectl get pods \
+        -n calico-system \
+        -l k8s-app=calico-node \
+        --no-headers 2>/dev/null \
+        | grep -q "Running"; then
+
+        echo "Calico node is running."
+        break
+    fi
+
+    echo "Waiting... ${i}/30"
+    sleep 10
+
+done
+
+
+# ============================================================
+# REMOVE CONTROL PLANE TAINT
+# ============================================================
+
+echo
+echo "Removing control-plane taint for single-node testing..."
+
+kubectl taint nodes \
+    "${CONTROL_PLANE_HOSTNAME}" \
+    node-role.kubernetes.io/control-plane:NoSchedule- \
+    2>/dev/null || true
+
+
+# ============================================================
+# INSTALL INGRESS-NGINX
+# ============================================================
+
+echo
+echo "[16/18] Install Ingress-NGINX"
+echo "------------------------------------------------------------"
+
+echo
+echo "Installing Ingress-NGINX ${INGRESS_VERSION}..."
+
+kubectl apply -f "${INGRESS_URL}"
+
+
+# ============================================================
+# WAIT FOR INGRESS
+# ============================================================
+
+echo
+echo "Waiting for Ingress-NGINX controller..."
+
+kubectl wait \
+    --namespace ingress-nginx \
+    --for=condition=ready \
+    pod \
+    --selector=app.kubernetes.io/component=controller \
+    --timeout=300s
+
+
+# ============================================================
+# INGRESS STATUS
+# ============================================================
+
+echo
+echo "Ingress-NGINX Pods:"
+kubectl get pods -n ingress-nginx
+
+echo
+echo "Ingress-NGINX Service:"
+kubectl get svc -n ingress-nginx
+
+
+# ============================================================
+# FINAL CLUSTER CHECK
+# ============================================================
+
+echo
+echo "[17/18] Final Cluster Verification"
+echo "------------------------------------------------------------"
+
+echo
+echo "============================================================"
+echo " NODES"
+echo "============================================================"
 
 kubectl get nodes -o wide
 
 
-# =========================================================
-# ALL PODS
-# =========================================================
-
-echo ""
-echo "========================================================="
-echo " All Kubernetes Pods"
-echo "========================================================="
-echo ""
+echo
+echo "============================================================"
+echo " ALL PODS"
+echo "============================================================"
 
 kubectl get pods -A
 
 
-# =========================================================
-# CALICO STATUS
-# =========================================================
+echo
+echo "============================================================"
+echo " TIGERA STATUS"
+echo "============================================================"
 
-echo ""
-echo "========================================================="
-echo " Calico Status"
-echo "========================================================="
-echo ""
-
-kubectl get tigerastatus 2>/dev/null || true
+kubectl get tigerastatus
 
 
-# =========================================================
-# GENERATE WORKER JOIN COMMAND
-# =========================================================
+echo
+echo "============================================================"
+echo " CALICO NODES"
+echo "============================================================"
 
-echo ""
-echo "========================================================="
+kubectl get pods -n calico-system -o wide
+
+
+echo
+echo "============================================================"
+echo " INGRESS"
+echo "============================================================"
+
+kubectl get pods -n ingress-nginx
+
+echo
+
+kubectl get svc -n ingress-nginx
+
+
+# ============================================================
+# WORKER JOIN COMMAND
+# ============================================================
+
+echo
+echo "[18/18] Generate Worker Join Command"
+echo "------------------------------------------------------------"
+
+echo
+echo "============================================================"
 echo " WORKER NODE JOIN COMMAND"
-echo "========================================================="
-echo ""
-
-echo "Run the following command on every Worker Node:"
-echo ""
+echo "============================================================"
+echo
 
 kubeadm token create --print-join-command
 
-echo ""
-echo "========================================================="
-echo " IMPORTANT"
-echo "========================================================="
-echo ""
-echo "Copy the complete kubeadm join command."
-echo ""
-echo "You will need it on every Worker Node."
-echo ""
-echo "========================================================="
+echo
+echo "============================================================"
 
 
-# =========================================================
-# FINAL STATUS
-# =========================================================
+# ============================================================
+# FINAL INFORMATION
+# ============================================================
 
-echo ""
-echo "========================================================="
-echo " CONTROL PLANE SETUP COMPLETED"
-echo "========================================================="
-echo ""
-echo " Hostname         : ${CONTROL_PLANE_HOSTNAME}"
-echo " Control Plane IP : ${CONTROL_PLANE_IP}"
-echo " Kubernetes       : ${K8S_VERSION}"
-echo " Containerd       : Installed"
-echo " Calico           : ${CALICO_VERSION}"
-echo " Pod Network CIDR : ${POD_NETWORK_CIDR}"
-echo ""
-echo "Useful commands:"
-echo ""
-echo "  kubectl get nodes -o wide"
-echo "  kubectl get pods -A"
-echo "  kubectl get svc -A"
-echo "  kubectl get tigerastatus"
-echo ""
-echo "========================================================="
-echo ""
+echo
+echo
+echo "============================================================"
+echo " INSTALLATION COMPLETED"
+echo "============================================================"
+echo
+echo "Hostname          : ${CONTROL_PLANE_HOSTNAME}"
+echo "Private IP        : ${CONTROL_PLANE_IP}"
+echo "Kubernetes        : ${K8S_VERSION}"
+echo "Container Runtime : containerd"
+echo "Calico            : ${CALICO_VERSION}"
+echo "Pod CIDR          : ${POD_NETWORK_CIDR}"
+echo "Ingress-NGINX     : ${INGRESS_VERSION}"
+echo
+echo "============================================================"
+echo " USEFUL COMMANDS"
+echo "============================================================"
+echo
+echo "kubectl get nodes -o wide"
+echo "kubectl get pods -A"
+echo "kubectl get svc -A"
+echo "kubectl get tigerastatus"
+echo "kubectl get pods -n calico-system"
+echo "kubectl get pods -n ingress-nginx"
+echo "kubectl get svc -n ingress-nginx"
+echo
+echo "============================================================"
+echo " INGRESS NODEPORT"
+echo "============================================================"
+echo
+echo "Run:"
+echo
+echo "kubectl get svc ingress-nginx-controller -n ingress-nginx"
+echo
+echo "Use the displayed HTTP/HTTPS NodePort in your"
+echo "AWS EC2 Security Group."
+echo
+echo "============================================================"
+echo " DONE"
+echo "============================================================"
+```
